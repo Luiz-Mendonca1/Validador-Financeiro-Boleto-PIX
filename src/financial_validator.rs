@@ -15,8 +15,7 @@
 //! println!("Boleto Válido: {}", boleto_res.is_valid);
 //! ```
 
-#![allow(dead_code)]
-#![allow(unused_variables)]
+#![allow(dead_code, unused_variables, unused_imports, unused_mut)]
 
 use serde::{Deserialize, Serialize};
 
@@ -312,6 +311,29 @@ impl FinancialValidator {
     /// Cria uma nova instância do validador.
     pub fn new() -> Self {
         FinancialValidator
+    }
+
+    fn boleto_deduplication_key(boleto: &BoletoResult) -> String {
+        boleto
+            .codigo_barras
+            .as_ref()
+            .map(|codigo| format!("barcode:{codigo}"))
+            .unwrap_or_else(|| format!("linha:{}", boleto.linha_digitavel_limpa))
+    }
+
+    fn has_standard_boleto_layout(snippet: &str, digit_count: usize) -> bool {
+        let groups: Vec<usize> = snippet
+            .split_whitespace()
+            .map(|token| token.chars().filter(|c| c.is_ascii_digit()).count())
+            .filter(|&count| count > 0)
+            .collect();
+
+        match digit_count {
+            47 => groups == [10, 11, 11, 1, 14] || groups == [47],
+            48 => groups == [12, 12, 12, 12] || groups == [48],
+            44 => groups == [44],
+            _ => false,
+        }
     }
 
     /// Converte um Código de Barras de 44 dígitos em Linha Digitável (47 ou 48 dígitos).
@@ -1099,36 +1121,34 @@ impl FinancialValidator {
                 acc_snippet.push(tok);
 
                 if acc_digits.len() == 47 || acc_digits.len() == 48 || acc_digits.len() == 44 {
-                    if !vistos_boletos.contains(&acc_digits) {
-                        let linha_analise = if acc_digits.len() == 44 {
-                            Self::barcode_to_linha_digitavel(&acc_digits).unwrap_or(acc_digits.clone())
-                        } else {
-                            acc_digits.clone()
-                        };
+                    let snippet = acc_snippet.join(" ");
+                    let linha_analise = if acc_digits.len() == 44 {
+                        Self::barcode_to_linha_digitavel(&acc_digits).unwrap_or(acc_digits.clone())
+                    } else {
+                        acc_digits.clone()
+                    };
+                    let boleto_res = self.validate_boleto(&linha_analise);
+                    let layout_confiavel =
+                        Self::has_standard_boleto_layout(&snippet, acc_digits.len());
+                    let candidato_confiavel = boleto_res.is_valid || layout_confiavel;
+                    let chave = Self::boleto_deduplication_key(&boleto_res);
 
-                        let boleto_res = self.validate_boleto(&linha_analise);
-                        if boleto_res.is_valid
-                            || boleto_res.campos_validacao.iter().filter(|c| c.valido).count() >= 2
-                            || acc_digits.len() == 47
-                            || acc_digits.len() == 48
-                        {
-                            vistos_boletos.insert(acc_digits.clone());
-                            let report = self.calculate_risk(Some(&boleto_res), None, valor_esperado);
+                    if candidato_confiavel && vistos_boletos.insert(chave) {
+                        let report = self.calculate_risk(Some(&boleto_res), None, valor_esperado);
 
-                            itens.push(DocumentFinancialItem {
-                                tipo: if acc_digits.len() == 44 {
-                                    "CODIGO_BARRAS_44".to_string()
-                                } else {
-                                    "BOLETO".to_string()
-                                },
-                                texto_bruto: acc_snippet.join(" "),
-                                boleto_resultado: Some(boleto_res),
-                                pix_resultado: None,
-                                report,
-                            });
-                            t_idx = j;
-                            break;
-                        }
+                        itens.push(DocumentFinancialItem {
+                            tipo: if acc_digits.len() == 44 {
+                                "CODIGO_BARRAS_44".to_string()
+                            } else {
+                                "BOLETO".to_string()
+                            },
+                            texto_bruto: snippet,
+                            boleto_resultado: Some(boleto_res),
+                            pix_resultado: None,
+                            report,
+                        });
+                        t_idx = j;
+                        break;
                     }
                 }
 
@@ -1150,9 +1170,8 @@ impl FinancialValidator {
                     && (chars[c_idx].is_ascii_digit()
                         || chars[c_idx] == '.'
                         || chars[c_idx] == '-'
-                        || chars[c_idx] == ' '
-                        || chars[c_idx] == '	'
-                        || chars[c_idx] == '/')
+                        || chars[c_idx] == '/'
+                        || chars[c_idx].is_whitespace())
                 {
                     c_idx += 1;
                 }
@@ -1162,20 +1181,22 @@ impl FinancialValidator {
                 if clean_digits.len() >= 47 {
                     for w in 0..=(clean_digits.len() - 47) {
                         let cand = &clean_digits[w..w + 47];
-                        if !vistos_boletos.contains(cand) {
-                            let boleto_res = self.validate_boleto(cand);
-                            if boleto_res.is_valid || boleto_res.campos_validacao.iter().filter(|c| c.valido).count() >= 2 {
-                                vistos_boletos.insert(cand.to_string());
-                                let report = self.calculate_risk(Some(&boleto_res), None, valor_esperado);
-                                itens.push(DocumentFinancialItem {
-                                    tipo: "BOLETO".to_string(),
-                                    texto_bruto: slice_str.trim().to_string(),
-                                    boleto_resultado: Some(boleto_res),
-                                    pix_resultado: None,
-                                    report,
-                                });
-                                break;
-                            }
+                        let boleto_res = self.validate_boleto(cand);
+                        let chave = Self::boleto_deduplication_key(&boleto_res);
+                        if (boleto_res.is_valid
+                            || (clean_digits.len() == 47
+                                && Self::has_standard_boleto_layout(&slice_str, 47)))
+                            && vistos_boletos.insert(chave)
+                        {
+                            let report = self.calculate_risk(Some(&boleto_res), None, valor_esperado);
+                            itens.push(DocumentFinancialItem {
+                                tipo: "BOLETO".to_string(),
+                                texto_bruto: slice_str.trim().to_string(),
+                                boleto_resultado: Some(boleto_res),
+                                pix_resultado: None,
+                                report,
+                            });
+                            break;
                         }
                     }
                 }
@@ -1183,29 +1204,33 @@ impl FinancialValidator {
                 if clean_digits.len() >= 48 {
                     for w in 0..=(clean_digits.len() - 48) {
                         let cand = &clean_digits[w..w + 48];
-                        if !vistos_boletos.contains(cand) {
-                            let boleto_res = self.validate_boleto(cand);
-                            if boleto_res.is_valid {
-                                vistos_boletos.insert(cand.to_string());
-                                let report = self.calculate_risk(Some(&boleto_res), None, valor_esperado);
-                                itens.push(DocumentFinancialItem {
-                                    tipo: "BOLETO".to_string(),
-                                    texto_bruto: slice_str.trim().to_string(),
-                                    boleto_resultado: Some(boleto_res),
-                                    pix_resultado: None,
-                                    report,
-                                });
-                                break;
-                            }
+                        let boleto_res = self.validate_boleto(cand);
+                        let chave = Self::boleto_deduplication_key(&boleto_res);
+                        if (boleto_res.is_valid
+                            || (clean_digits.len() == 48
+                                && Self::has_standard_boleto_layout(&slice_str, 48)))
+                            && vistos_boletos.insert(chave)
+                        {
+                            let report = self.calculate_risk(Some(&boleto_res), None, valor_esperado);
+                            itens.push(DocumentFinancialItem {
+                                tipo: "BOLETO".to_string(),
+                                texto_bruto: slice_str.trim().to_string(),
+                                boleto_resultado: Some(boleto_res),
+                                pix_resultado: None,
+                                report,
+                            });
+                            break;
                         }
                     }
                 }
 
-                if clean_digits.len() == 44 && !vistos_boletos.contains(&clean_digits) {
+                if clean_digits.len() == 44
+                    && Self::has_standard_boleto_layout(&slice_str, 44)
+                {
                     if let Some(ld) = Self::barcode_to_linha_digitavel(&clean_digits) {
                         let boleto_res = self.validate_boleto(&ld);
-                        if boleto_res.dv_geral_valido || boleto_res.is_valid {
-                            vistos_boletos.insert(clean_digits.clone());
+                        let chave = Self::boleto_deduplication_key(&boleto_res);
+                        if vistos_boletos.insert(chave) {
                             let report = self.calculate_risk(Some(&boleto_res), None, valor_esperado);
                             itens.push(DocumentFinancialItem {
                                 tipo: "CODIGO_BARRAS_44".to_string(),
@@ -1225,27 +1250,55 @@ impl FinancialValidator {
         // Pass 3: Varredura por linhas inteiras
         for line in text.lines() {
             let limpo: String = line.chars().filter(|c| c.is_ascii_digit()).collect();
-            if (limpo.len() == 47 || limpo.len() == 48 || limpo.len() == 44) && vistos_boletos.insert(limpo.clone()) {
+            if limpo.len() == 47 || limpo.len() == 48 || limpo.len() == 44 {
                 let linha_analise = if limpo.len() == 44 {
                     Self::barcode_to_linha_digitavel(&limpo).unwrap_or(limpo.clone())
                 } else {
                     limpo.clone()
                 };
                 let boleto_res = self.validate_boleto(&linha_analise);
-                let report = self.calculate_risk(Some(&boleto_res), None, valor_esperado);
+                let chave = Self::boleto_deduplication_key(&boleto_res);
+                let candidato_confiavel = boleto_res.is_valid
+                    || Self::has_standard_boleto_layout(line, limpo.len());
 
-                itens.push(DocumentFinancialItem {
-                    tipo: if limpo.len() == 44 { "CODIGO_BARRAS_44".to_string() } else { "BOLETO".to_string() },
-                    texto_bruto: line.trim().to_string(),
-                    boleto_resultado: Some(boleto_res),
-                    pix_resultado: None,
-                    report,
-                });
+                if candidato_confiavel && vistos_boletos.insert(chave) {
+                    let report = self.calculate_risk(Some(&boleto_res), None, valor_esperado);
+                    itens.push(DocumentFinancialItem {
+                        tipo: if limpo.len() == 44 { "CODIGO_BARRAS_44".to_string() } else { "BOLETO".to_string() },
+                        texto_bruto: line.trim().to_string(),
+                        boleto_resultado: Some(boleto_res),
+                        pix_resultado: None,
+                        report,
+                    });
+                }
             }
         }
 
         if itens.is_empty() {
-            alertas.push("Nenhum boleto ou código PIX foi localizado no documento analisado.".to_string());
+            if text.trim().len() < 30 {
+                alertas.push("O documento analisado possui pouco texto legível ou pode ser uma foto/scan sem camada de texto OCR.".to_string());
+            } else {
+                alertas.push("Nenhum boleto (47D, 48D ou código de barras 44D) ou código PIX foi localizado no documento analisado.".to_string());
+            }
+        } else {
+            let valores_fatura = Self::extrair_valores_monetarios_do_texto(text);
+            for item in &itens {
+                let item_valor = item
+                    .boleto_resultado
+                    .as_ref()
+                    .and_then(|b| b.valor)
+                    .or_else(|| item.pix_resultado.as_ref().and_then(|p| p.valor));
+
+                if let Some(val) = item_valor {
+                    if let Some(esp) = valor_esperado {
+                        if (val - esp).abs() < 0.01 {
+                            alertas.push(format!("Valor (R$ {:.2}) confere exatamente com o valor esperado informado.", val));
+                        }
+                    } else if !valores_fatura.is_empty() && valores_fatura.iter().any(|&vf: &f64| (vf - val).abs() < 0.01) {
+                        alertas.push(format!("Valor (R$ {:.2}) coincide com valor faturado no corpo do documento.", val));
+                    }
+                }
+            }
         }
 
         let mut total_validos = 0;
@@ -1295,6 +1348,37 @@ impl FinancialValidator {
             alertas_documento: alertas,
         }
     }
+
+    /// Extrai possíveis valores monetários presentes no texto do documento (ex: R$ 150,00 ou 1.250,50)
+    pub fn extrair_valores_monetarios_do_texto(text: &str) -> Vec<f64> {
+        let mut valores: Vec<f64> = Vec::new();
+        let words: Vec<&str> = text.split_whitespace().collect();
+        for (i, word) in words.iter().enumerate() {
+            let is_currency = word.contains("R$")
+                || (i > 0 && words[i - 1].contains("R$"))
+                || (i > 0 && words[i - 1].to_uppercase().contains("VALOR"))
+                || (i > 0 && words[i - 1].to_uppercase().contains("TOTAL"));
+
+            let clean: String = word
+                .chars()
+                .filter(|c| c.is_ascii_digit() || *c == ',' || *c == '.')
+                .collect();
+
+            if (clean.contains(',') || clean.contains('.')) && is_currency {
+                let normalized = if clean.contains(',') {
+                    clean.replace('.', "").replace(',', ".")
+                } else {
+                    clean
+                };
+                if let Ok(v) = normalized.parse::<f64>() {
+                    if v > 0.0 && v < 10_000_000.0 && !valores.iter().any(|&ex: &f64| (ex - v).abs() < 0.01) {
+                        valores.push(v);
+                    }
+                }
+            }
+        }
+        valores
+    }
 }
 
 // ============================================================================
@@ -1334,6 +1418,48 @@ mod tests {
 
         assert!(!result.is_valid, "Boleto com DV alterado deve ser rejeitado");
         assert!(result.erros.iter().any(|e| e.contains("DV do Campo 1 inválido")));
+    }
+
+    #[test]
+    fn test_document_scan_ignores_number_fragments_and_deduplicates_boleto() {
+        let validator = FinancialValidator::new();
+        let texto = concat!(
+            "34191.09016 23507.078238 31222.850005 3 16260000046526\n",
+            "109/01235070-78233/12228-5 10/11/2026 28/10/2026 00:00:00\n",
+            "341-7 28/10/2026 10/11/2026 8233/12228-5 109/01235070-7 465,26\n",
+            "0,00 3419316260000046526109012350707823312228 5000\n",
+            "34193162600000465261090123507078233122285000\n",
+        );
+
+        let report = validator.find_and_validate_in_text(texto, None);
+
+        assert_eq!(
+            report.total_itens_encontrados,
+            1,
+            "Candidatos detectados: {:?}",
+            report
+                .itens
+                .iter()
+                .map(|item| (
+                    &item.tipo,
+                    &item.texto_bruto,
+                    item.boleto_resultado
+                        .as_ref()
+                        .map(|boleto| &boleto.linha_digitavel_limpa),
+                    item.boleto_resultado.as_ref().map(|boleto| boleto.is_valid),
+                ))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(report.total_validos, 1);
+        assert_eq!(report.total_invalidos, 0);
+        assert_eq!(report.score_risco_global, 0);
+
+        let fraude = validator.find_and_validate_in_text(
+            "Linha digitável:\n00190.00004 01041.800408 00000.000059 2 97890000015000",
+            None,
+        );
+        assert_eq!(fraude.total_itens_encontrados, 1);
+        assert_eq!(fraude.total_invalidos, 1);
     }
 
     /// Teste 3: PIX Copia e Cola (EMV BR Code) Válido com CRC16 CCITT-FALSE

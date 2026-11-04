@@ -17,12 +17,14 @@
 //! - Executar no modo automático interativo:
 //!   `cargo run`
 
+#![allow(unused_imports, dead_code)]
+
 mod financial_validator;
 
-use financial_validator::{DocumentAnalysisReport, FinancialValidator, RiskRecommendation};
+use financial_validator::{DocumentAnalysisReport, FinancialValidator};
 use std::env;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -238,7 +240,7 @@ fn run_batch_directory_analysis(validator: &FinancialValidator, dir_path: &Path,
     println!("                  RESUMO DA AUDITORIA EM LOTE                       ");
     println!("====================================================================");
     println!("Total de documentos analisados: {}", total_docs_analisados);
-    println!("Documentos 100% Seguros / Aprovados: {}", total_docs_aprovados);
+    println!("Documentos Seguros / Aprovados: {}", total_docs_aprovados);
     println!("Documentos Suspeitos / Reprovados:  {}", total_docs_suspeitos);
     println!("Total de boletos e PIX auditados:   {}", total_itens_financeiros);
     println!("====================================================================");
@@ -246,58 +248,70 @@ fn run_batch_directory_analysis(validator: &FinancialValidator, dir_path: &Path,
 
 /// Imprime os detalhes de um único relatório
 fn print_report_summary(path: &Path, report: &DocumentAnalysisReport) {
+    println!("--------------------------------------------------------------------");
     println!("Documento: {}", path.display());
-    println!("Status Global: {}", if report.documento_confiavel { "CONFIÁVEL / ÍNTEGRO" } else { "SUSPEITO / RISCO DETECTADO" });
+    println!("Status Global: {}", if report.documento_confiavel { "[+] CONFIÁVEL / ÍNTEGRO" } else { "[!] SUSPEITO / RISCO DETECTADO" });
     println!("Score de Risco Antifraude: {}/100", report.score_risco_global);
     println!("Recomendação do Motor: {:?}", report.recomendacao_global);
-    println!("Total de Boletos/PIX no documento: {}", report.total_itens_encontrados);
-    println!("Itens Válidos: {}", report.total_validos);
-    println!("Itens Inválidos / Adulterados: {}", report.total_invalidos);
+    println!("Total de Itens Financeiros Encontrados: {}", report.total_itens_encontrados);
+    println!("  -> Válidos: {} | Inválidos/Adulterados: {}", report.total_validos, report.total_invalidos);
 
     for (i, item) in report.itens.iter().enumerate() {
-        println!("\n--- [Item #{}] Tipo: {} ---", i + 1, item.tipo);
-        println!("Texto Bruto Extraído: {}", item.texto_bruto);
+        println!("\n  [Item #{}] Tipo: {}", i + 1, item.tipo);
+        println!("  Texto Bruto: {}", item.texto_bruto);
         if let Some(boleto) = &item.boleto_resultado {
-            println!("  -> Banco: {:?}", boleto.banco_nome);
-            println!("  -> Tipo Boleto: {:?}", boleto.tipo);
-            println!("  -> Valor no Boleto: R$ {:?}", boleto.valor);
-            println!("  -> Vencimento Estimado: {:?}", boleto.data_vencimento_estimada);
-            println!("  -> DVs dos Blocos Válidos: {}", boleto.campos_validacao.iter().all(|c| c.valido));
-            println!("  -> DV Geral da Barra Válido: {}", boleto.dv_geral_valido);
-            println!("  -> Status Final: {}", if boleto.is_valid { "VÁLIDO" } else { "FRAUDADO" });
+            println!("    Banco Emissor: {}", boleto.banco_nome.as_deref().unwrap_or("Não identificado"));
+            println!("    Linha Limpa (47D/48D): {}", boleto.linha_digitavel_limpa);
+            if let Some(cb) = &boleto.codigo_barras {
+                println!("    Código de Barras (44D): {}", cb);
+            }
+            if let Some(v) = boleto.valor {
+                println!("    Valor no Boleto: R$ {:.2}", v);
+            }
+            if let Some(venc) = &boleto.data_vencimento_estimada {
+                println!("    Vencimento Estimado: {}", venc);
+            }
+            println!("    DVs dos Blocos: {}", if boleto.campos_validacao.iter().all(|c| c.valido) { "VÁLIDOS (Módulo 10/11)" } else { "INVÁLIDOS / ADULTERADOS" });
+            println!("    DV Geral da Barra: {}", if boleto.dv_geral_valido { "VÁLIDO (Módulo 11)" } else { "INVÁLIDO" });
+            println!("    Status Final: {}", if boleto.is_valid { "[APROVADO] Boleto Autêntico" } else { "[REJEITADO] Boleto Fraudado / Bolware" });
         }
         if let Some(pix) = &item.pix_resultado {
-            println!("  -> Beneficiário: {:?}", pix.beneficiario_nome);
-            println!("  -> Chave PIX: {:?}", pix.chave_pix);
-            println!("  -> Tipo de Chave: {:?}", pix.tipo_chave);
-            println!("  -> Valor: R$ {:?}", pix.valor);
-            println!("  -> Cidade: {:?}", pix.beneficiario_cidade);
-            println!("  -> Checksum CRC16 Informado: {}", pix.crc16_informado);
-            println!("  -> Checksum CRC16 Calculado: {}", pix.crc16_calculado);
-            println!("  -> Integridade CRC16: {}", pix.crc16_valido);
-            println!("  -> Status Final: {}", if pix.is_valid { "VÁLIDO" } else { "CORROMPIDO / ADULTERADO" });
+            println!("    Beneficiário: {}", pix.beneficiario_nome.as_deref().unwrap_or("N/D"));
+            println!("    Cidade: {}", pix.beneficiario_cidade.as_deref().unwrap_or("N/D"));
+            println!("    Chave PIX: {} ({})", pix.chave_pix.as_deref().unwrap_or("N/D"), pix.tipo_chave.as_deref().unwrap_or("N/D"));
+            if let Some(v) = pix.valor {
+                println!("    Valor PIX: R$ {:.2}", v);
+            }
+            println!("    Checksum CRC16: Calculado: {} | Informado: {} [{}]",
+                     pix.crc16_calculado, pix.crc16_informado, if pix.crc16_valido { "VÁLIDO" } else { "ADULTERADO" });
+            println!("    Status Final: {}", if pix.is_valid { "[APROVADO] PIX Autêntico" } else { "[REJEITADO] PIX Corrompido / Man-in-the-Middle" });
         }
     }
 
     if !report.alertas_documento.is_empty() {
-        println!("\nAlertas de Segurança:");
+        println!("\nAlertas de Auditoria:");
         for alerta in &report.alertas_documento {
             println!("  [!] {}", alerta);
         }
     }
+    println!("--------------------------------------------------------------------");
 }
 
-/// Extrai texto de arquivos de forma robusta e resiliente
-/// Suporta:
-/// 1. Arquivos de texto puro (TXT, CSV, JSON, logs)
-/// 2. PDFs reais com streams comprimidos zlib (/FlateDecode)
-/// 3. Documentos Word (.docx) via extração de word/document.xml
-/// 4. Fallback de streams binários e caracteres imprimíveis
+/// Extrai texto completo de qualquer documento suportado (PDF, Word DOCX/DOC, TXT, etc.)
+/// Equivalente aos extratores do modelo web (PDF.js + Mammoth).
 fn extract_text_from_file(path: &Path) -> String {
-    // 1. Tenta leitura UTF-8 direta (ideal para TXT, CSV, JSON, logs)
-    if let Ok(text) = fs::read_to_string(path) {
-        if !text.trim().is_empty() {
-            return text;
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    // 1. Tenta leitura UTF-8 para arquivos de texto puro
+    if ext == "txt" || ext == "csv" || ext == "json" || ext == "log" || ext == "emv" {
+        if let Ok(text) = fs::read_to_string(path) {
+            if !text.trim().is_empty() {
+                return text;
+            }
         }
     }
 
@@ -307,29 +321,178 @@ fn extract_text_from_file(path: &Path) -> String {
         Err(_) => return String::new(),
     };
 
-    // 3. Se for PDF (%PDF-)
-    if bytes.starts_with(b"%PDF") || bytes.windows(4).any(|w| w == b"%PDF") {
-        let pdf_text = extract_text_from_pdf(&bytes);
+    // 3. Documento PDF (extensão .pdf ou cabeçalho %PDF)
+    if ext == "pdf" || bytes.starts_with(b"%PDF") || bytes.windows(4).any(|w| w == b"%PDF") {
+        let pdf_text = extract_text_from_pdf(path, &bytes);
         if !pdf_text.trim().is_empty() {
             return pdf_text;
         }
     }
 
-    // 4. Se for DOCX (arquivo ZIP com PK\x03\x04)
-    if bytes.starts_with(b"PK\x03\x04") {
-        let docx_text = extract_text_from_docx_zip(&bytes);
+    // 4. Documento Word DOCX (.docx ou arquivo ZIP com cabeçalho PK\x03\x04)
+    if ext == "docx" || bytes.starts_with(b"PK\x03\x04") {
+        let docx_text = extract_text_from_docx(&bytes);
         if !docx_text.trim().is_empty() {
             return docx_text;
         }
     }
 
-    // 5. Fallback para arquivos binários genéricos: extrai todas as sequências ASCII/UTF-8
+    // 5. Documento Word DOC Legado (.doc / cabeçalho OLE CFB 0xD0, 0xCF, 0x11, 0xE0)
+    if ext == "doc" || (bytes.len() >= 4 && bytes[0] == 0xD0 && bytes[1] == 0xCF && bytes[2] == 0x11 && bytes[3] == 0xE0) {
+        let doc_text = extract_text_from_legacy_doc(&bytes);
+        if !doc_text.trim().is_empty() {
+            return doc_text;
+        }
+    }
+
+    // 6. Tenta decodificação UTF-8 ou Latin-1
+    if let Ok(text) = std::str::from_utf8(&bytes) {
+        if !text.trim().is_empty() {
+            return text.to_string();
+        }
+    }
+
+    // 7. Fallback geral para varredura de sequências ASCII imprimíveis
     extract_ascii_strings_fallback(&bytes)
 }
 
-/// Extrai texto de PDFs, descompactando streams zlib (/FlateDecode)
-/// e interpretando operadores textuais do PDF (Tj, TJ, strings entre parênteses)
-fn extract_text_from_pdf(bytes: &[u8]) -> String {
+/// Extrai texto de PDFs utilizando motor multicamada profissional:
+/// Camada 1: Crate especializada 'pdf-extract' (decodifica fontes embutidas, ToUnicode CMaps, TrueType e Type1)
+/// Camada 2: Descompressão nativa de streams FlateDecode via miniz_oxide e operadores PDF (Tj, TJ, hex)
+/// Camada 3: Varredura profunda de strings ASCII/UTF-8
+fn extract_text_from_pdf(path: &Path, bytes: &[u8]) -> String {
+    // Camada 1: Tenta extrair com pdf-extract em memória
+    if let Ok(text) = pdf_extract::extract_text_from_mem(bytes) {
+        if text.trim().len() > 10 {
+            return text;
+        }
+    }
+
+    // Tenta extrair com pdf-extract direto do caminho do arquivo
+    if let Ok(text) = pdf_extract::extract_text(path) {
+        if text.trim().len() > 10 {
+            return text;
+        }
+    }
+
+    // Camada 2: Descompressão nativa de streams PDF (/FlateDecode)
+    let stream_text = extract_text_from_pdf_streams(bytes);
+    if stream_text.trim().len() > 10 {
+        return stream_text;
+    }
+
+    // Camada 3: Fallback de sequências ASCII
+    extract_ascii_strings_fallback(bytes)
+}
+
+/// Varre o PDF em busca de streams de mapas de caracteres (/ToUnicode CMaps)
+/// Essencial para decodificar PDFs bancários reais com fontes CID/Type0 embutidas
+fn parse_pdf_cmaps(bytes: &[u8]) -> std::collections::HashMap<u16, char> {
+    let mut cmap = std::collections::HashMap::new();
+    let stream_keyword = b"stream";
+    let endstream_keyword = b"endstream";
+    let mut cursor = 0;
+
+    while cursor < bytes.len() {
+        if let Some(pos) = bytes[cursor..].windows(stream_keyword.len()).position(|w| w == stream_keyword) {
+            let stream_start = cursor + pos + stream_keyword.len();
+            let mut data_start = stream_start;
+            while data_start < bytes.len() && (bytes[data_start] == b'\r' || bytes[data_start] == b'\n') {
+                data_start += 1;
+            }
+
+            if let Some(end_pos) = bytes[data_start..].windows(endstream_keyword.len()).position(|w| w == endstream_keyword) {
+                let mut data_end = data_start + end_pos;
+                while data_end > data_start && (bytes[data_end - 1] == b'\r' || bytes[data_end - 1] == b'\n') {
+                    data_end -= 1;
+                }
+
+                if data_end > data_start {
+                    let stream_data = &bytes[data_start..data_end];
+                    let decomp = miniz_oxide::inflate::decompress_to_vec_zlib(stream_data)
+                        .or_else(|_| miniz_oxide::inflate::decompress_to_vec(stream_data));
+
+                    if let Ok(decomp_bytes) = decomp {
+                        if let Ok(text) = std::str::from_utf8(&decomp_bytes) {
+                            if text.contains("beginbfchar") || text.contains("beginbfrange") {
+                                parse_single_cmap_stream(text, &mut cmap);
+                            }
+                        }
+                    }
+                }
+                cursor = data_end + endstream_keyword.len();
+            } else {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+
+    cmap
+}
+
+/// Extrai mapeamentos de um stream CMap individual (beginbfchar e beginbfrange)
+fn parse_single_cmap_stream(text: &str, cmap: &mut std::collections::HashMap<u16, char>) {
+    // 1. beginbfchar: <CID_HEX> <UNICODE_HEX>
+    let mut cursor = 0;
+    while let Some(idx) = text[cursor..].find("beginbfchar") {
+        let sec_start = cursor + idx + 11;
+        if let Some(end_rel) = text[sec_start..].find("endbfchar") {
+            let sec = &text[sec_start..sec_start + end_rel];
+            let tokens: Vec<&str> = sec.split_whitespace().collect();
+            let mut i = 0;
+            while i + 1 < tokens.len() {
+                let t1 = tokens[i].trim_matches(|c| c == '<' || c == '>');
+                let t2 = tokens[i + 1].trim_matches(|c| c == '<' || c == '>');
+                if let (Ok(src), Ok(dst)) = (u16::from_str_radix(t1, 16), u32::from_str_radix(t2, 16)) {
+                    if let Some(ch) = char::from_u32(dst) {
+                        cmap.insert(src, ch);
+                    }
+                }
+                i += 2;
+            }
+            cursor = sec_start + end_rel + 9;
+        } else {
+            break;
+        }
+    }
+
+    // 2. beginbfrange: <START_CID_HEX> <END_CID_HEX> <START_UNICODE_HEX>
+    cursor = 0;
+    while let Some(idx) = text[cursor..].find("beginbfrange") {
+        let sec_start = cursor + idx + 12;
+        if let Some(end_rel) = text[sec_start..].find("endbfrange") {
+            let sec = &text[sec_start..sec_start + end_rel];
+            let tokens: Vec<&str> = sec.split_whitespace().collect();
+            let mut i = 0;
+            while i + 2 < tokens.len() {
+                let t1 = tokens[i].trim_matches(|c| c == '<' || c == '>');
+                let t2 = tokens[i + 1].trim_matches(|c| c == '<' || c == '>');
+                let t3 = tokens[i + 2].trim_matches(|c| c == '<' || c == '>');
+                if let (Ok(s1), Ok(s2), Ok(dst_start)) = (
+                    u16::from_str_radix(t1, 16),
+                    u16::from_str_radix(t2, 16),
+                    u32::from_str_radix(t3, 16),
+                ) {
+                    for (offset, c) in (s1..=s2).enumerate() {
+                        if let Some(ch) = char::from_u32(dst_start + offset as u32) {
+                            cmap.insert(c, ch);
+                        }
+                    }
+                }
+                i += 3;
+            }
+            cursor = sec_start + end_rel + 10;
+        } else {
+            break;
+        }
+    }
+}
+
+/// Extrai texto de todos os streams descompactados de um PDF aplicando ToUnicode CMaps
+fn extract_text_from_pdf_streams(bytes: &[u8]) -> String {
+    let cmap = parse_pdf_cmaps(bytes);
     let mut extracted = String::new();
     let stream_keyword = b"stream";
     let endstream_keyword = b"endstream";
@@ -352,14 +515,21 @@ fn extract_text_from_pdf(bytes: &[u8]) -> String {
                 if data_end > data_start {
                     let stream_data = &bytes[data_start..data_end];
 
-                    // Tenta descompressão zlib (FlateDecode) usando miniz_oxide
                     let decompressed = miniz_oxide::inflate::decompress_to_vec_zlib(stream_data)
                         .or_else(|_| miniz_oxide::inflate::decompress_to_vec(stream_data));
 
                     if let Ok(decomp_bytes) = decompressed {
-                        parse_pdf_stream_text(&decomp_bytes, &mut extracted);
+                        parse_pdf_stream_text(&decomp_bytes, &cmap, &mut extracted);
+                        extracted.push('\n');
+                        let fallback = extract_ascii_strings_fallback(&decomp_bytes);
+                        if !fallback.trim().is_empty() {
+                            extracted.push(' ');
+                            extracted.push_str(&fallback);
+                            extracted.push('\n');
+                        }
                     } else {
-                        parse_pdf_stream_text(stream_data, &mut extracted);
+                        parse_pdf_stream_text(stream_data, &cmap, &mut extracted);
+                        extracted.push('\n');
                     }
                 }
 
@@ -372,18 +542,11 @@ fn extract_text_from_pdf(bytes: &[u8]) -> String {
         }
     }
 
-    // Se nenhum texto for obtido de streams ou para complementar, varre o PDF bruto
-    if extracted.trim().len() < 20 {
-        let raw_strings = extract_ascii_strings_fallback(bytes);
-        extracted.push_str(" ");
-        extracted.push_str(&raw_strings);
-    }
-
     extracted
 }
 
-/// Interpreta operadores de texto em streams PDF descomprimidos (Tj, TJ, hex strings e escapes)
-fn parse_pdf_stream_text(stream: &[u8], out: &mut String) {
+/// Interpreta operadores de texto em streams PDF descomprimidos (Tj, TJ, hex strings e escapes com CMap)
+fn parse_pdf_stream_text(stream: &[u8], cmap: &std::collections::HashMap<u16, char>, out: &mut String) {
     let mut i = 0;
     while i < stream.len() {
         if stream[i] == b'(' {
@@ -434,7 +597,7 @@ fn parse_pdf_stream_text(stream: &[u8], out: &mut String) {
                 out.push(' ');
             }
         } else if stream[i] == b'<' && i + 1 < stream.len() && stream[i + 1] != b'<' {
-            // Hex string <...>
+            // Hex string <...> (usada para textos em fontes CID / Type0)
             i += 1;
             let mut hex = String::new();
             while i < stream.len() && stream[i] != b'>' {
@@ -446,18 +609,36 @@ fn parse_pdf_stream_text(stream: &[u8], out: &mut String) {
             if i < stream.len() && stream[i] == b'>' {
                 i += 1;
             }
-            if hex.len() % 2 == 0 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+
+            if hex.len() % 4 == 0 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                // CID de 2 bytes (ou UTF-16BE) decodificado via CMap
+                let mut decoded = String::new();
+                for chunk in hex.as_bytes().chunks(4) {
+                    if let Ok(val) = u16::from_str_radix(std::str::from_utf8(chunk).unwrap_or(""), 16) {
+                        if let Some(&ch) = cmap.get(&val) {
+                            decoded.push(ch);
+                        } else if val >= 32 && val <= 126 {
+                            decoded.push((val as u8) as char);
+                        }
+                    }
+                }
+                if !decoded.is_empty() {
+                    out.push_str(&decoded);
+                }
+            } else if hex.len() % 2 == 0 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
                 let mut decoded = String::new();
                 for chunk in hex.as_bytes().chunks(2) {
                     if let Ok(byte_val) = u8::from_str_radix(std::str::from_utf8(chunk).unwrap_or(""), 16) {
-                        if byte_val >= 32 && byte_val <= 126 {
+                        let val16 = byte_val as u16;
+                        if let Some(&ch) = cmap.get(&val16) {
+                            decoded.push(ch);
+                        } else if byte_val >= 32 && byte_val <= 126 {
                             decoded.push(byte_val as char);
                         }
                     }
                 }
                 if !decoded.is_empty() {
                     out.push_str(&decoded);
-                    out.push(' ');
                 }
             }
         } else {
@@ -466,47 +647,93 @@ fn parse_pdf_stream_text(stream: &[u8], out: &mut String) {
     }
 }
 
-/// Extrai texto de arquivos Word (.docx) localizando o arquivo word/document.xml no ZIP
-fn extract_text_from_docx_zip(bytes: &[u8]) -> String {
-    let mut cursor = 0;
-    let pk_header = b"PK\x03\x04";
+/// Extrai texto de arquivos Word (.docx) compatível com Mammoth (lê word/document.xml)
+fn extract_text_from_docx(bytes: &[u8]) -> String {
+    // Camada 1: Crate zip oficial
+    let cursor = std::io::Cursor::new(bytes);
+    if let Ok(mut archive) = zip::ZipArchive::new(cursor) {
+        let mut full_text = String::new();
+        let targets = ["word/document.xml", "word/document2.xml", "word/footnotes.xml", "word/endnotes.xml"];
+        for target in &targets {
+            if let Ok(mut file) = archive.by_name(target) {
+                let mut xml_content = String::new();
+                if file.read_to_string(&mut xml_content).is_ok() {
+                    let parsed = parse_word_xml_text(&xml_content);
+                    if !parsed.is_empty() {
+                        full_text.push_str(&parsed);
+                        full_text.push('\n');
+                    }
+                }
+            }
+        }
+        if full_text.trim().len() > 5 {
+            return full_text;
+        }
+    }
 
-    while cursor + 30 <= bytes.len() {
-        if &bytes[cursor..cursor + 4] == pk_header {
-            let comp_method = u16::from_le_bytes([bytes[cursor + 8], bytes[cursor + 9]]);
+    // Camada 2: Fallback manual por busca no Central Directory do ZIP
+    let manual = extract_text_from_docx_zip_manual(bytes);
+    if manual.trim().len() > 5 {
+        return manual;
+    }
+
+    extract_ascii_strings_fallback(bytes)
+}
+
+/// Fallback manual para arquivos DOCX via varredura do Central Directory do ZIP
+/// (Lê o diretório central onde o tamanho comprimido e offset são garantidos mesmo com bit 3 ativo)
+fn extract_text_from_docx_zip_manual(bytes: &[u8]) -> String {
+    let cdir_header = b"PK\x01\x02";
+    let mut cursor = 0;
+    while cursor + 46 <= bytes.len() {
+        if &bytes[cursor..cursor + 4] == cdir_header {
+            let comp_method = u16::from_le_bytes([bytes[cursor + 10], bytes[cursor + 11]]);
             let comp_size = u32::from_le_bytes([
-                bytes[cursor + 18],
-                bytes[cursor + 19],
                 bytes[cursor + 20],
                 bytes[cursor + 21],
+                bytes[cursor + 22],
+                bytes[cursor + 23],
             ]) as usize;
-            let name_len = u16::from_le_bytes([bytes[cursor + 26], bytes[cursor + 27]]) as usize;
-            let extra_len = u16::from_le_bytes([bytes[cursor + 28], bytes[cursor + 29]]) as usize;
+            let name_len = u16::from_le_bytes([bytes[cursor + 28], bytes[cursor + 29]]) as usize;
+            let extra_len = u16::from_le_bytes([bytes[cursor + 30], bytes[cursor + 31]]) as usize;
+            let comment_len = u16::from_le_bytes([bytes[cursor + 32], bytes[cursor + 33]]) as usize;
+            let local_header_offset = u32::from_le_bytes([
+                bytes[cursor + 42],
+                bytes[cursor + 43],
+                bytes[cursor + 44],
+                bytes[cursor + 45],
+            ]) as usize;
 
-            let name_start = cursor + 30;
-            let data_start = name_start + name_len + extra_len;
-
+            let name_start = cursor + 46;
             if name_start + name_len <= bytes.len() {
                 if let Ok(filename) = std::str::from_utf8(&bytes[name_start..name_start + name_len]) {
-                    if filename == "word/document.xml" && data_start + comp_size <= bytes.len() {
-                        let comp_data = &bytes[data_start..data_start + comp_size];
-                        let xml_bytes = if comp_method == 8 {
-                            miniz_oxide::inflate::decompress_to_vec(comp_data).ok()
-                        } else if comp_method == 0 {
-                            Some(comp_data.to_vec())
-                        } else {
-                            None
-                        };
+                    if filename == "word/document.xml" || filename == "word/document2.xml" {
+                        if local_header_offset + 30 <= bytes.len() && &bytes[local_header_offset..local_header_offset + 4] == b"PK\x03\x04" {
+                            let loc_name_len = u16::from_le_bytes([bytes[local_header_offset + 26], bytes[local_header_offset + 27]]) as usize;
+                            let loc_extra_len = u16::from_le_bytes([bytes[local_header_offset + 28], bytes[local_header_offset + 29]]) as usize;
+                            let data_start = local_header_offset + 30 + loc_name_len + loc_extra_len;
 
-                        if let Some(xml_raw) = xml_bytes {
-                            if let Ok(xml_str) = std::str::from_utf8(&xml_raw) {
-                                return parse_word_xml_text(xml_str);
+                            if data_start + comp_size <= bytes.len() {
+                                let comp_data = &bytes[data_start..data_start + comp_size];
+                                let xml_bytes = if comp_method == 8 {
+                                    miniz_oxide::inflate::decompress_to_vec(comp_data).ok()
+                                } else if comp_method == 0 {
+                                    Some(comp_data.to_vec())
+                                } else {
+                                    None
+                                };
+
+                                if let Some(xml_raw) = xml_bytes {
+                                    if let Ok(xml_str) = std::str::from_utf8(&xml_raw) {
+                                        return parse_word_xml_text(xml_str);
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
-            cursor = data_start + comp_size;
+            cursor += 46 + name_len + extra_len + comment_len;
         } else {
             cursor += 1;
         }
@@ -515,23 +742,69 @@ fn extract_text_from_docx_zip(bytes: &[u8]) -> String {
     String::new()
 }
 
-/// Extrai conteúdo de texto das tags <w:t> do Word XML
+/// Extrai texto de arquivos Word legados (.doc binário do Word 97-2003)
+fn extract_text_from_legacy_doc(bytes: &[u8]) -> String {
+    let mut out = String::new();
+    let mut utf16_chunk = Vec::new();
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        let b1 = bytes[i];
+        let b2 = bytes[i + 1];
+        if b2 == 0 && ((b1 >= 32 && b1 <= 126) || b1 == b'\n' || b1 == b'\r' || b1 == b'\t') {
+            utf16_chunk.push(b1 as u16);
+            i += 2;
+        } else {
+            if utf16_chunk.len() >= 4 {
+                if let Ok(s) = String::from_utf16(&utf16_chunk) {
+                    out.push_str(&s);
+                    out.push(' ');
+                }
+            }
+            utf16_chunk.clear();
+            i += 1;
+        }
+    }
+    if utf16_chunk.len() >= 4 {
+        if let Ok(s) = String::from_utf16(&utf16_chunk) {
+            out.push_str(&s);
+        }
+    }
+    if out.trim().len() > 10 {
+        return out;
+    }
+    extract_ascii_strings_fallback(bytes)
+}
+
+/// Extrai conteúdo de texto das tags <w:t> do Word XML, respeitando parágrafos
 fn parse_word_xml_text(xml: &str) -> String {
     let mut out = String::new();
     let mut cursor = 0;
-    while let Some(pos) = xml[cursor..].find("<w:t") {
-        let tag_start = cursor + pos;
-        if let Some(tag_end) = xml[tag_start..].find('>') {
-            let content_start = tag_start + tag_end + 1;
-            if let Some(close_tag) = xml[content_start..].find("</w:t>") {
-                let content = &xml[content_start..content_start + close_tag];
-                out.push_str(content);
-                out.push(' ');
-                cursor = content_start + close_tag + 6;
-                continue;
+    while cursor < xml.len() {
+        if let Some(pos) = xml[cursor..].find("<w:t") {
+            let tag_start = cursor + pos;
+            if let Some(tag_end) = xml[tag_start..].find('>') {
+                let content_start = tag_start + tag_end + 1;
+                if let Some(close_tag) = xml[content_start..].find("</w:t>") {
+                    let content = &xml[content_start..content_start + close_tag];
+                    out.push_str(content);
+                    cursor = content_start + close_tag + 6;
+
+                    if let Some(p_close) = xml[cursor..].find("</w:p>") {
+                        if p_close < 30 {
+                            out.push('\n');
+                        } else {
+                            out.push(' ');
+                        }
+                    } else {
+                        out.push(' ');
+                    }
+                    continue;
+                }
             }
+            cursor = tag_start + 4;
+        } else {
+            break;
         }
-        cursor = tag_start + 4;
     }
     out
 }

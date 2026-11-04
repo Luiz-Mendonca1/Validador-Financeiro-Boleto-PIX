@@ -32,4 +32,4 @@ cargo run -- "./minha_pasta_de_faturas"
 ```cmd
 cargo test
 ```
-Todos os 6 testes unitários com Payloads oficiais Febraban e Bacen passarão com 100% de sucesso.
+Todos os 7 testes unitários com Payloads oficiais Febraban e Bacen passarão com 100% de sucesso.

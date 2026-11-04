@@ -1,0 +1,49 @@
+[
+  {
+    "alertas": [
+      "Valor (R$ 150.00) coincide com valor faturado no corpo do documento."
+    ],
+    "arquivo": "documentos\\01_boleto_banco_brasil_valido.txt",
+    "confiavel": true,
+    "itens_invalidos": 0,
+    "itens_validos": 1,
+    "recomendacao": "aprovar_automaticamente",
+    "score_risco": 0,
+    "total_itens": 1
+  },
+  {
+    "alertas": [
+      "Valor (R$ 150.00) coincide com valor faturado no corpo do documento.",
+      "Item 'BOLETO' falhou na validação de integridade ou DVs. Risco de fraude."
+    ],
+    "arquivo": "documentos\\02_boleto_fraude_dv_adulterado.txt",
+    "confiavel": false,
+    "itens_invalidos": 1,
+    "itens_validos": 0,
+    "recomendacao": "rejeitar_operacao",
+    "score_risco": 55,
+    "total_itens": 1
+  },
+  {
+    "alertas": [
+      "Item 'PIX' falhou na validação de integridade ou DVs. Risco de fraude."
+    ],
+    "arquivo": "documentos\\03_pix_estatico_valido.txt",
+    "confiavel": false,
+    "itens_invalidos": 1,
+    "itens_validos": 0,
+    "recomendacao": "rejeitar_operacao",
+    "score_risco": 85,
+    "total_itens": 1
+  },
+  {
+    "alertas": [],
+    "arquivo": "documentos\\04_boleto_real_unifan_itau.pdf",
+    "confiavel": true,
+    "itens_invalidos": 0,
+    "itens_validos": 1,
+    "recomendacao": "aprovar_automaticamente",
+    "score_risco": 0,
+    "total_itens": 1
+  }
+]

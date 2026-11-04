@@ -1,2 +1,3 @@
 /target\n**/*.rs.bk\nCargo.lock\n
-/documentos/pdfs
+/documentos/arquivos
+/target
