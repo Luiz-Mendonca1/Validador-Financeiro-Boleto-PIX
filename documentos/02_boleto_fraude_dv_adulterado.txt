@@ -1,0 +1,6 @@
+ALERTA DE SEGURANCA - BOLETO ADULTERADO POR VIRUS/BOLWARE
+Beneficiario Ficticio: CONTA FANTASMA LTDA
+Linha Digitavel Fraudada (DV do Campo 1 alterado de 9 para 4):
+00190.00004 01041.800408 00000.000059 2 97890000015000
+Valor: R$ 150,00
+Status: O sistema detecta a adulteracao de DV e rejeita o pagamento.

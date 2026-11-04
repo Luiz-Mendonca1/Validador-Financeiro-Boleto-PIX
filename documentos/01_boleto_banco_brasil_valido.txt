@@ -1,0 +1,7 @@
+FATURA DE COBRANCA BANCO DO BRASIL S.A.
+Beneficiario: EMPRESA FORNECEDORA DE TECNOLOGIA LTDA
+Linha Digitavel:
+00190.00009 01041.800408 00000.000059 2 97890000015000
+Vencimento: 15/10/2026
+Valor Documento: R$ 150,00
+Status: Boleto legitimo matematicamente verificado.
