@@ -21,60 +21,385 @@
 
 mod financial_validator;
 
-use financial_validator::{DocumentAnalysisReport, FinancialValidator};
+use financial_validator::{DocumentAnalysisReport, FinancialValidator, ValidationReport};
 use std::env;
 use std::fs;
 use std::io::{self, Read, Write};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-fn main() {
-    print_banner();
+use axum::{
+    response::Html,
+    routing::{get, post},
+    Json, Router,
+};
+use serde::{Deserialize, Serialize};
 
-    let validator = FinancialValidator::new();
+#[derive(Deserialize)]
+struct ValidateRequest {
+    codigo: String,
+    valor_esperado: Option<f64>,
+}
+
+#[derive(Serialize)]
+struct ValidateResponse {
+    is_valid: bool,
+    tipo: String,
+    report: ValidationReport,
+}
+
+#[tokio::main]
+async fn main() {
     let args: Vec<String> = env::args().collect();
 
-    // 1. Determina a rota (caminho do arquivo ou pasta)
-    let (rota, valor_esperado) = if args.len() >= 2 {
+    // Se argumentos forem passados pelo terminal, executa a análise CLI de arquivos/pastas
+    if args.len() >= 2 {
+        print_banner();
+        let validator = FinancialValidator::new();
         let path = args[1].clone();
         let expected_val = args.get(2).and_then(|v| v.replace(',', ".").parse::<f64>().ok());
-        (path, expected_val)
-    } else {
-        // Modo Interativo / Automático
-        let default_dir = Path::new("documentos");
-        if default_dir.exists() && default_dir.is_dir() {
-            println!("==> Rota não informada via parâmetro. Pasta padrão detectada: './documentos'");
-            ("documentos".to_string(), None)
-        } else {
-            prompt_user_for_route()
-        }
-    };
 
-    let target_path = Path::new(&rota);
-    if !target_path.exists() {
-        eprintln!("\n[ERRO] O caminho informado não existe: '{}'", rota);
-        eprintln!("Por favor, verifique a rota e tente novamente.");
+        let target_path = Path::new(&path);
+        if !target_path.exists() {
+            eprintln!("\n[ERRO] O caminho informado não existe: '{}'", path);
+            eprintln!("Por favor, verifique a rota e tente novamente.");
+            return;
+        }
+
+        let start_time = Instant::now();
+
+        if target_path.is_dir() {
+            // ====================================================================
+            // MODO BATCH: Analisar múltiplos documentos na pasta
+            // ====================================================================
+            println!("\n>>> INICIANDO ANÁLISE EM LOTE NA PASTA: '{}'\n", path);
+            run_batch_directory_analysis(&validator, target_path, expected_val);
+        } else {
+            // ====================================================================
+            // MODO INDIVIDUAL: Analisar arquivo único
+            // ====================================================================
+            println!("\n>>> ANALISANDO DOCUMENTO ÚNICO: '{}'\n", path);
+            run_single_file_analysis(&validator, target_path, expected_val);
+        }
+
+        let elapsed = start_time.elapsed();
+        println!("\nProcessamento concluído em {:.2}s.", elapsed.as_secs_f64());
         return;
     }
 
-    let start_time = Instant::now();
+    // Caso contrário (sem argumentos), inicia o servidor Web em localhost:3000
+    print_banner();
 
-    if target_path.is_dir() {
-        // ====================================================================
-        // MODO BATCH: Analisar múltiplos documentos na pasta
-        // ====================================================================
-        println!("\n>>> INICIANDO ANÁLISE EM LOTE NA PASTA: '{}'\n", rota);
-        run_batch_directory_analysis(&validator, target_path, valor_esperado);
-    } else {
-        // ====================================================================
-        // MODO INDIVIDUAL: Analisar arquivo único
-        // ====================================================================
-        println!("\n>>> ANALISANDO DOCUMENTO ÚNICO: '{}'\n", rota);
-        run_single_file_analysis(&validator, target_path, valor_esperado);
+    let app = Router::new()
+        .route("/", get(page_handler))
+        .route("/api/validar", post(validate_handler));
+
+    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    println!("============================================================");
+    println!("   VALIDADOR FINANCEIRO LOCAL — CYPHER LABS                 ");
+    println!("   Acesse no navegador: http://localhost:3000              ");
+    println!("============================================================\n");
+
+    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    axum::serve(listener, app).await.unwrap();
+}
+
+// URL do seu CYPHER ADM (na Vercel ou local)
+const CYPHER_ADM_URL: &str = "https://cypher-adm.vercel.app";
+
+/// Descobre o IP real da máquina onde o validador está sendo executado
+fn get_local_ip() -> String {
+    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
+        if socket.connect("8.8.8.8:80").is_ok() {
+            if let Ok(addr) = socket.local_addr() {
+                return addr.ip().to_string();
+            }
+        }
     }
+    "127.0.0.1".to_string()
+}
 
-    let elapsed = start_time.elapsed();
-    println!("\nProcessamento concluído em {:.2}s.", elapsed.as_secs_f64());
+/// Envia o alerta para o CYPHER ADM apenas se o documento apresentar risco
+fn notify_cypher_adm_if_risky(caminho_ou_origem: &str, report: &DocumentAnalysisReport) {
+    // FILTRO: Só notifica se tiver risco real (score > 20)
+    if report.score_risco_global > 20 {
+        let hostname = env::var("COMPUTERNAME").unwrap_or_else(|_| "Desconhecido".into());
+        let ip = get_local_ip();
+
+        let rec_str = match report.recomendacao_global {
+            financial_validator::RiskRecommendation::AprovarAutomaticamente => "Aprovar Automaticamente",
+            financial_validator::RiskRecommendation::RevisaoManualRequerida => "Revisão Manual Requerida",
+            financial_validator::RiskRecommendation::RejeitarOperacao => "Rejeitar Operação (Fraude Detectada)",
+        };
+
+        let fatores: Vec<String> = if report.alertas_documento.is_empty() {
+            vec!["Dígitos Verificadores Inválidos / Risco de Bolware".to_string()]
+        } else {
+            report.alertas_documento.clone()
+        };
+
+        let payload = serde_json::json!({
+            "hostname": hostname,
+            "ip": ip,
+            "arquivo": caminho_ou_origem,
+            "confiavel": report.documento_confiavel, // <-- Campo que o servidor pediu
+            "score_risco": report.score_risco_global,
+            "recomendacao": rec_str,
+            "fatores_risco": fatores.clone(),
+            "detalhes_alerta": fatores,
+        });
+
+        println!("\n🚨 [CYPHER ALERTA] Risco detectado! Notificando o CYPHER ADM...");
+
+        tokio::task::spawn_blocking(move || {
+            let client = match reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(4))
+                .build()
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("[!] Erro ao inicializar cliente HTTP: {:?}", e);
+                    return;
+                }
+            };
+
+            let endpoint = format!("{}/api/audit/financial", CYPHER_ADM_URL);
+
+            match client.post(&endpoint).json(&payload).send() {
+                Ok(resp) => {
+                    if resp.status().is_success() {
+                        println!("[+] Alerta entregue com sucesso ao CYPHER ADM (Status: {}).", resp.status());
+                    } else {
+                        eprintln!("[-] ADM respondeu com código: {}", resp.status());
+                        if let Ok(text) = resp.text() {
+                            eprintln!("[-] Resposta do servidor: {}", text);
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[-] Falha ao conectar ao CYPHER ADM: {:?}", e);
+                }
+            }
+        });
+    }
+}
+
+async fn validate_handler(Json(payload): Json<ValidateRequest>) -> Json<ValidateResponse> {
+    let validator = FinancialValidator::new();
+    let codigo = payload.codigo.trim();
+
+    let (is_valid, tipo, report) = if codigo.starts_with("000201") {
+        let pix_res = validator.validate_pix(codigo);
+        let rep = validator.calculate_risk(None, Some(&pix_res), payload.valor_esperado);
+        (pix_res.is_valid, "PIX".to_string(), rep)
+    } else {
+        let boleto_res = validator.validate_boleto(codigo);
+        let rep = validator.calculate_risk(Some(&boleto_res), None, payload.valor_esperado);
+        (boleto_res.is_valid, "BOLETO".to_string(), rep)
+    };
+
+    // Se for suspeito, avisa o ADM com a origem:
+    let doc_report = DocumentAnalysisReport {
+        score_risco_global: report.score_risco,
+        alertas_documento: report.fatores_risco.iter().map(|f| f.descricao.clone()).collect(),
+        total_itens_encontrados: 1,
+        total_validos: if is_valid { 1 } else { 0 },
+        total_invalidos: if is_valid { 0 } else { 1 },
+        documento_confiavel: is_valid && report.score_risco <= 20,
+        recomendacao_global: report.recomendacao.clone(),
+        itens: Vec::new(),
+    };
+    notify_cypher_adm_if_risky("Validação Manual Localhost", &doc_report);
+
+    Json(ValidateResponse {
+        is_valid,
+        tipo,
+        report,
+    })
+}
+
+async fn page_handler() -> Html<&'static str> {
+    Html(r#"<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Validador de Boletos // CYPHER</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Plus Jakarta Sans', sans-serif; }
+        .mono { font-family: 'JetBrains Mono', monospace; }
+    </style>
+</head>
+<body class="bg-[#0b101b] text-slate-100 min-h-screen flex flex-col justify-center items-center p-4 relative overflow-x-hidden">
+
+    <div class="w-full max-w-xl bg-[#121829] border border-slate-800 rounded-2xl p-6 sm:p-8 shadow-2xl z-10">
+        <div class="flex items-center gap-3 mb-6 pb-4 border-b border-slate-800">
+            <div class="w-9 h-9 rounded-xl bg-[#1D59F2] flex items-center justify-center font-bold text-white shadow-lg shadow-blue-500/20">
+                ✓
+            </div>
+            <div>
+                <h1 class="text-lg font-bold text-white tracking-tight">Validador de Boletos & PIX</h1>
+                <p class="text-xs text-slate-400">Verificação matemática de DVs, Módulo 10/11 e integridade antifraude</p>
+            </div>
+        </div>
+
+        <form onsubmit="handleValidate(event)" class="space-y-4">
+            <div>
+                <label class="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-1.5">
+                    Linha Digitável, Código de Barras ou PIX
+                </label>
+                <textarea id="codigo" rows="3" required placeholder="Cole aqui o código (47D, 48D, 44D ou 000201...)"
+                    class="w-full bg-[#070b14] border border-slate-700/80 rounded-xl px-4 py-3 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-[#1D59F2] focus:ring-1 focus:ring-[#1D59F2] mono transition-all"></textarea>
+            </div>
+
+            <div>
+                <label class="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-1.5">
+                    Valor Esperado em R$ (Opcional - para conferir divergência)
+                </label>
+                <input id="valor" type="number" step="0.01" placeholder="Ex: 150.00"
+                    class="w-full bg-[#070b14] border border-slate-700/80 rounded-xl px-4 py-2.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-[#1D59F2] mono transition-all">
+            </div>
+
+            <button type="submit"
+                class="w-full bg-[#1D59F2] hover:bg-[#1546cb] text-white font-bold text-sm py-3 px-4 rounded-xl transition-all shadow-lg shadow-blue-500/25 flex items-center justify-center gap-2">
+                <span>Validar Autenticidade</span>
+            </button>
+        </form>
+
+        <div id="resultado" class="hidden mt-6 pt-5 border-t border-slate-800"></div>
+    </div>
+
+    <!-- Marca-d'água oficial CYPHER no canto inferior direito -->
+    <div class="fixed bottom-5 right-6 z-20 flex items-center gap-2.5 hover:opacity-90 transition-opacity duration-300 pointer-events-none select-none">
+        <svg viewBox="0 0 215 203" class="w-7 h-7 fill-white">
+            <circle cx="109.04" cy="37.80" r="10.69"/>
+            <circle cx="134.69" cy="30.12" r="2.26"/>
+            <circle cx="149.44" cy="34.40" r="2.82"/>
+            <circle cx="84.46" cy="42.17" r="7.92"/>
+            <circle cx="133.61" cy="45.60" r="7.74"/>
+            <circle cx="163.79" cy="44.72" r="5.67"/>
+            <circle cx="61.37" cy="52.54" r="8.21"/>
+            <circle cx="150.65" cy="60.04" r="5.56"/>
+            <circle cx="103.71" cy="57.50" r="2.11"/>
+            <circle cx="177.30" cy="63.90" r="8.48"/>
+            <circle cx="90.63" cy="60.63" r="3.09"/>
+            <circle cx="44.00" cy="67.43" r="4.41"/>
+            <circle cx="75.94" cy="68.85" r="4.58"/>
+            <circle cx="159.40" cy="74.96" r="2.82"/>
+            <circle cx="59.25" cy="84.62" r="7.78"/>
+            <circle cx="181.56" cy="90.00" r="11.30"/>
+            <circle cx="36.77" cy="84.43" r="3.34"/>
+            <circle cx="162.80" cy="87.50" r="1.78"/>
+            <circle cx="45.82" cy="110.67" r="12.68"/>
+            <circle cx="174.22" cy="116.86" r="8.00"/>
+            <circle cx="69.00" cy="112.50" r="2.88"/>
+            <circle cx="189.50" cy="121.20" r="1.78"/>
+            <circle cx="71.70" cy="128.09" r="4.85"/>
+            <circle cx="47.32" cy="137.84" r="8.76"/>
+            <circle cx="159.30" cy="134.35" r="5.08"/>
+            <circle cx="183.72" cy="134.83" r="3.83"/>
+            <circle cx="81.65" cy="143.48" r="5.29"/>
+            <circle cx="143.50" cy="143.50" r="3.19"/>
+            <circle cx="128.88" cy="146.59" r="2.33"/>
+            <circle cx="172.10" cy="149.28" r="5.78"/>
+            <circle cx="62.30" cy="156.72" r="6.89"/>
+            <circle cx="97.94" cy="158.25" r="8.18"/>
+            <circle cx="125.15" cy="167.31" r="13.04"/>
+            <circle cx="152.26" cy="162.21" r="8.46"/>
+            <circle cx="77.16" cy="169.19" r="3.70"/>
+            <circle cx="91.80" cy="175.20" r="2.19"/>
+        </svg>
+        <span class="text-xl font-extrabold tracking-tight text-white font-sans lowercase">cypher</span>
+    </div>
+
+    <script>
+        async function handleValidate(e) {
+            e.preventDefault();
+            const codigo = document.getElementById('codigo').value.trim();
+            const valorInput = document.getElementById('valor').value.trim();
+            const valor_esperado = valorInput ? parseFloat(valorInput) : null;
+            const resDiv = document.getElementById('resultado');
+
+            resDiv.innerHTML = '<p class="text-xs text-slate-400 mono">Processando checksums...</p>';
+            resDiv.classList.remove('hidden');
+
+            try {
+                const response = await fetch('/api/validar', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ codigo, valor_esperado })
+                });
+
+                const data = await response.json();
+                renderResult(data);
+            } catch (err) {
+                resDiv.innerHTML = '<p class="text-xs text-rose-400">Erro ao comunicar com o servidor local.</p>';
+            }
+        }
+
+        function renderResult(data) {
+            const resDiv = document.getElementById('resultado');
+            const rep = data.report;
+            const isValid = data.is_valid;
+
+            let html = `
+                <div class="p-4 rounded-xl border ${isValid ? 'bg-emerald-500/10 border-emerald-500/30' : 'bg-rose-500/10 border-rose-500/30'} mb-4">
+                    <div class="flex items-center justify-between mb-2">
+                        <span class="text-xs font-bold uppercase tracking-wider ${isValid ? 'text-emerald-400' : 'text-rose-400'}">
+                            ${isValid ? '✓ DOCUMENTO VÁLIDO' : '⚠ FRAUDE / CHECKSUM INVÁLIDO'}
+                        </span>
+                        <span class="text-xs mono font-bold text-slate-300">Score Risco: ${rep.score_risco}/100</span>
+                    </div>
+                    <p class="text-xs text-slate-300 font-medium">Recomendação: <strong class="uppercase text-white">${rep.recomendacao.replace(/_/g, ' ')}</strong></p>
+                </div>
+            `;
+
+            if (rep.boleto_detalhes) {
+                const b = rep.boleto_detalhes;
+                html += `
+                    <div class="space-y-2 text-xs mono bg-[#070b14] p-4 rounded-xl border border-slate-800 text-slate-300">
+                        <div>Banco Emissor: <strong class="text-white">${b.banco_nome || 'N/D'} (${b.banco_codigo || 'N/D'})</strong></div>
+                        <div>Valor no Boleto: <strong class="text-white">${b.valor !== null ? 'R$ ' + b.valor.toFixed(2) : 'Aberto'}</strong></div>
+                        <div>Vencimento: <strong class="text-white">${b.data_vencimento_estimada || 'Não especificado'}</strong></div>
+                        <div>DV Geral: <strong class="${b.dv_geral_valido ? 'text-emerald-400' : 'text-rose-400'}">${b.dv_geral_valido ? 'VÁLIDO' : 'INVÁLIDO'}</strong></div>
+                    </div>
+                `;
+            }
+
+            if (rep.pix_detalhes) {
+                const p = rep.pix_detalhes;
+                html += `
+                    <div class="space-y-2 text-xs mono bg-[#070b14] p-4 rounded-xl border border-slate-800 text-slate-300">
+                        <div>Beneficiário: <strong class="text-white">${p.beneficiario_nome || 'N/D'}</strong></div>
+                        <div>Cidade: <strong class="text-white">${p.beneficiario_cidade || 'N/D'}</strong></div>
+                        <div>Chave PIX: <strong class="text-white">${p.chave_pix || 'N/D'}</strong> (${p.tipo_chave || 'N/D'})</div>
+                        <div>Valor PIX: <strong class="text-white">${p.valor !== null ? 'R$ ' + p.valor.toFixed(2) : 'Aberto'}</strong></div>
+                        <div>CRC16: <strong class="${p.crc16_valido ? 'text-emerald-400' : 'text-rose-400'}">${p.crc16_informado} (${p.crc16_valido ? 'VÁLIDO' : 'ADULTERADO'})</strong></div>
+                    </div>
+                `;
+            }
+
+            if (rep.fatores_risco && rep.fatores_risco.length > 0) {
+                html += `
+                    <div class="mt-3 space-y-1">
+                        <span class="text-[11px] font-bold text-rose-400 uppercase tracking-wider block">Fatores de Risco Encontrados:</span>
+                        ${rep.fatores_risco.map(f => `
+                            <div class="text-xs text-rose-300 bg-rose-950/30 p-2 rounded border border-rose-900/40">
+                                <strong>[${f.codigo}]</strong> ${f.descricao}
+                            </div>
+                        `).join('')}
+                    </div>
+                `;
+            }
+
+            resDiv.innerHTML = html;
+        }
+    </script>
+</body>
+</html>"#)
 }
 
 /// Exibe o cabeçalho do sistema
@@ -153,6 +478,7 @@ fn run_single_file_analysis(validator: &FinancialValidator, file_path: &Path, va
 
     let report = validator.find_and_validate_in_text(&text, valor_esperado);
     print_report_summary(file_path, &report);
+    notify_cypher_adm_if_risky(&file_path.to_string_lossy(), &report);
 }
 
 /// Executa análise recursiva em lote de todos os arquivos de um diretório
@@ -193,6 +519,7 @@ fn run_batch_directory_analysis(validator: &FinancialValidator, dir_path: &Path,
         } else {
             total_docs_suspeitos += 1;
             println!("  -> STATUS: [REJEITADO / ALTO RISCO] Score: {}/100", report.score_risco_global);
+            notify_cypher_adm_if_risky(&file.to_string_lossy(), &report);
         }
 
         println!("  -> Itens encontrados: {} (Válidos: {}, Inválidos: {})", 

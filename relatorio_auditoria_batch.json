@@ -35,15 +35,5 @@
     "recomendacao": "rejeitar_operacao",
     "score_risco": 85,
     "total_itens": 1
-  },
-  {
-    "alertas": [],
-    "arquivo": "documentos\\04_boleto_real_unifan_itau.pdf",
-    "confiavel": true,
-    "itens_invalidos": 0,
-    "itens_validos": 1,
-    "recomendacao": "aprovar_automaticamente",
-    "score_risco": 0,
-    "total_itens": 1
   }
 ]
